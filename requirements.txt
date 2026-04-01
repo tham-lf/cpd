@@ -8,3 +8,5 @@ openai
 pymupdf
 python-dotenv
 httpx
+sqlalchemy
+psycopg2-binary

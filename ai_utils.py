@@ -39,8 +39,9 @@ async def get_ai_metadata(sile_text, web_text, pdf_text):
     PROMPT INSTRUCTIONS:
     - PRICES: The PDF Brochure (if provided) is the ABSOLUTE source of truth for pricing. If not available, use the Provider Website.
     - POINTS: Use the SILE Details for the official Public CPD Points and MEC (Ethics) status. 
-    - DEFAULT TO FREE: If the text describes a registration process but NO prices or fees (e.g. '$', 'price', 'fee', 'cost') are mentioned anywhere in the brochure or website, assume the event is FREE.
-    - RECONCILIATION: Compare SILE dates/points with brochure. Proactively look for 'Complimentary' or 'No charge'.
+    - STRICT FREE DEFINITION: DO NOT assume an event is free just because a price isn't explicitly listed. Only set "Is_Free" to true if the text EXPLICITLY states it is "Free", "Complimentary", "No charge", or "S$0".
+    - MISSING PRICES: If pricing information is completely missing, and it does not explicitly say "free", set "Prices" to "Unknown" and "Is_Free" to false. It is better to flag a course for manual review than to falsely label a paid course as free.
+    - RECONCILIATION: Compare SILE dates/points with brochure.
 
     SOURCES:
     --- SILE DETAILS ---

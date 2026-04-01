@@ -3,7 +3,13 @@ import pandas as pd
 import asyncio
 import os
 import sys
+from dotenv import load_dotenv
+from sqlalchemy import create_engine
 from cpd_scraper import run_scraper
+
+load_dotenv()
+db_url = os.environ.get("DATABASE_URL")
+engine = create_engine(db_url) if db_url else None
 
 # Fix for Windows asyncio NotImplementedError
 if sys.platform == 'win32':
@@ -19,6 +25,12 @@ st.set_page_config(
 # Load feedback data if exists
 FEEDBACK_FILE = "cpd_feedback.csv"
 def load_feedback():
+    if engine:
+        try:
+            return pd.read_sql_table('feedback', engine)
+        except Exception as e:
+            st.warning(f"Warning: Database connected but feedback table missing or failed: {e}")
+            return pd.DataFrame(columns=["EventID", "Status", "ManualPrice", "Notes"])
     if os.path.exists(FEEDBACK_FILE):
         return pd.read_csv(FEEDBACK_FILE)
     return pd.DataFrame(columns=["EventID", "Status", "ManualPrice", "Notes"])
@@ -29,7 +41,10 @@ def save_feedback(event_id, status, manual_price=None, notes=""):
     df = df[df["EventID"] != event_id]
     new_row = pd.DataFrame([{"EventID": event_id, "Status": status, "ManualPrice": manual_price, "Notes": notes}])
     df = pd.concat([df, new_row], ignore_index=True)
-    df.to_csv(FEEDBACK_FILE, index=False)
+    if engine:
+        df.to_sql('feedback', engine, if_exists='replace', index=False)
+    else:
+        df.to_csv(FEEDBACK_FILE, index=False)
 
 st.title("⚖️ SILE CPD Course Finder")
 st.markdown("""
@@ -41,6 +56,13 @@ This tool scrapes the [SILE CALAS](https://www.silecpdcentre.sg/calas/) list and
 CSV_FILE = "cpd_courses.csv"
 
 def load_data():
+    if engine:
+        try:
+            st.info("Loading Live Course Data fully from AWS PostgreSQL...")
+            return pd.read_sql_table('courses', engine)
+        except Exception as e:
+            st.error(f"Cannot read AWS Database. Check that the tables have been generated: {e}")
+            return pd.DataFrame()
     if os.path.exists(CSV_FILE):
         return pd.read_csv(CSV_FILE)
     return pd.DataFrame()
@@ -62,8 +84,7 @@ if st.button("🔄 Refresh / Start Scrape"):
         st.success("Scraping complete!")
         st.rerun()
 
-if os.path.exists("cpd_courses.csv"):
-    df = pd.read_csv("cpd_courses.csv")
+if not df.empty:
     feedback_df = load_feedback()
     
     # Merge with feedback
@@ -72,6 +93,9 @@ if os.path.exists("cpd_courses.csv"):
     # --- VISUALLY PLEASING OVERVIEW STATS ---
     st.markdown("---")
     st.subheader("📊 Course Overview")
+    
+    if "Last_Scraped" in df.columns and not df.empty:
+        st.caption(f"🕒 **Data Last Updated:** {df['Last_Scraped'].dropna().iloc[0] if len(df['Last_Scraped'].dropna()) > 0 else 'Unknown'}")
     
     total_courses = len(df)
     free_count = len(df[df["Is_Free"] == True]) if "Is_Free" in df.columns else 0

@@ -171,6 +171,42 @@ async def scrape_event_details(page, event_id):
                 await page.goto(ext_link, wait_until="domcontentloaded", timeout=15000)
                 ext_text = await page.inner_text("body")
                 print(f"[{event_id}] Extracted {len(ext_text)} chars from external website.")
+                
+                # Scan for nested brochures and custom provider logic
+                from urllib.parse import urljoin
+                links_html = await page.locator("a").element_handles()
+                
+                reg_url_to_visit = None
+                
+                for link_element in links_html:
+                    href = await link_element.get_attribute("href")
+                    if href:
+                        text = await link_element.inner_text()
+                        
+                        if "legalbusinessonline" in ext_link.lower() and "register" in text.lower():
+                            reg_url_to_visit = urljoin(ext_link, href)
+                            
+                        if "brochure" in text.lower() or "download" in text.lower() or href.lower().endswith(".pdf"):
+                            full_url = urljoin(ext_link, href)
+                            try:
+                                content = await download_pdf_content(full_url)
+                                ext_pdf_text = extract_text_from_pdf(content)
+                                pdf_text += "\n" + ext_pdf_text
+                                print(f"[{event_id}] Extracted {len(ext_pdf_text)} chars from nested brochure PDF: {full_url}")
+                                break # Stop after finding the first valid brochure to save time/bandwidth
+                            except Exception:
+                                pass
+                                
+                if reg_url_to_visit:
+                    try:
+                        await page.goto(reg_url_to_visit, wait_until="domcontentloaded", timeout=15000)
+                        reg_text = await page.inner_text("body")
+                        ext_text += "\n--- REGISTRATION PAGE ---\n" + reg_text
+                        ext_text += "\n*** SPECIAL OVERRIDE FOR LegalBusinessOnline: If the registration page text above doesn't explicitly mention any fees or prices, you MUST classify this event as FREE (Is_Free: true, Prices: '$0'). Do NOT use the strict unknown fallback! ***"
+                        print(f"[{event_id}] LegalBusinessOnline: Extracted registration page: {reg_url_to_visit}")
+                    except Exception as e:
+                        print(f"[{event_id}] LegalBusinessOnline: Failed to load register page: {e}")
+                        
             except Exception as e:
                 print(f"[{event_id}] Warning: External Link fetch failed: {e}")
 
@@ -262,10 +298,24 @@ async def run_scraper(progress_callback=None, limit=None):
             return pd.DataFrame()
 
         df = pd.DataFrame(results)
+        df["Last_Scraped"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
-        # Save to CSV
-        output_file = "cpd_courses.csv"
-        df.to_csv(output_file, index=False)
+        from dotenv import load_dotenv
+        from sqlalchemy import create_engine
+        import os
+        
+        load_dotenv()
+        db_url = os.getenv("DATABASE_URL")
+        
+        if db_url:
+            engine = create_engine(db_url)
+            df.to_sql('courses', engine, if_exists='replace', index=False)
+            output_file = "PostgreSQL Database"
+        else:
+            # Save to CSV
+            output_file = "cpd_courses.csv"
+            df.to_csv(output_file, index=False)
+            
         print(f"\nScraping complete! Results saved to {output_file}")
         
         await browser.close()
