@@ -18,7 +18,7 @@ from cpd_scraper import run_scraper
 
 load_dotenv()
 db_url = os.environ.get("DATABASE_URL")
-engine = create_engine(db_url) if db_url else None
+engine = create_engine(db_url, connect_args={'connect_timeout': 5}) if db_url else None
 
 # Fix for Windows asyncio NotImplementedError
 if sys.platform == 'win32':

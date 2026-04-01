@@ -2,12 +2,9 @@ libnss3
 libatk-bridge2.0-0
 libx11-xcb1
 libxcb-dri3-0
-libscintilla-tpm-0
 libxcomposite1
 libxdamage1
-libxext6
 libxfixes3
-libnss3
 libcups2
 libdrm2
 libxrandr2
@@ -16,4 +13,3 @@ libasound2
 libpango-1.0-0
 libpangocairo-1.0-0
 libatk1.0-0
-libxshmfence1
