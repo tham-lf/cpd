@@ -4,6 +4,15 @@ import asyncio
 import os
 import sys
 from dotenv import load_dotenv
+
+# Inject Streamlit Secrets into OS Environment for downstream modules
+try:
+    for key, value in st.secrets.items():
+        if isinstance(value, str):
+            os.environ[key] = value
+except Exception:
+    pass
+
 from sqlalchemy import create_engine
 from cpd_scraper import run_scraper
 
