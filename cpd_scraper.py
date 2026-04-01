@@ -249,6 +249,9 @@ async def scrape_event_details(page, event_id):
     return data
 
 async def run_scraper(progress_callback=None, limit=None):
+    # Ensure browser binaries exist (crucial for Streamlit Cloud environments)
+    os.system("playwright install chromium")
+    
     async with async_playwright() as p:
         # Use more realistic headers
         browser = await p.chromium.launch(headless=True)
