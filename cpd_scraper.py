@@ -256,7 +256,10 @@ async def run_scraper(progress_callback=None, limit=None):
     
     async with async_playwright() as p:
         # Use more realistic headers
-        browser = await p.chromium.launch(headless=True)
+        browser = await p.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
+        )
         user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
         context = await browser.new_context(user_agent=user_agent)
         page = await context.new_page()
