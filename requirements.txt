@@ -1,0 +1,10 @@
+playwright
+beautifulsoup4
+pandas
+openpyxl
+tabulate
+streamlit
+openai
+pymupdf
+python-dotenv
+httpx
