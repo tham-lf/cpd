@@ -177,7 +177,7 @@ if not df.empty:
         filtered_df,
         hide_index=True,
         column_config=column_config,
-        use_container_width=True
+        width="stretch"
     )
 else:
     st.info("No data available. Click 'Start AI-Powered Scrape' to fetch current events.")
