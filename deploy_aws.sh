@@ -19,5 +19,6 @@ python -m playwright install-deps chromium
 
 sudo ufw allow 80/tcp
 sudo ufw allow 8501/tcp
+sudo ufw allow 5000/tcp
 
 echo "Done! You can now start the services using pm2 start ecosystem.config.js"

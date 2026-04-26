@@ -17,6 +17,16 @@ module.exports = {
       env: {
         NODE_ENV: "production",
       }
+    },
+    {
+      name: "whatsapp-bot",
+      script: "venv/bin/python",
+      args: "whatsapp_bot.py",
+      interpreter: "none",
+      env: {
+        NODE_ENV: "production",
+        WHATSAPP_PORT: "5000",
+      }
     }
   ]
 };
