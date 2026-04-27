@@ -1,0 +1,64 @@
+name: SILE CPD scrape and broadcast
+
+on:
+  schedule:
+    # 18:00 UTC = 02:00 SGT daily.
+    # Staggered 12h with the GitLab pipeline (06:00 UTC) so SILE is polled twice/day
+    # without double-broadcast — the diff-aware digest skips when there are no new EventIDs.
+    - cron: '0 18 * * *'
+  workflow_dispatch:
+    inputs:
+      force_broadcast:
+        description: 'Post to channels even if no new entries'
+        required: false
+        default: 'false'
+
+concurrency:
+  group: scrape
+  cancel-in-progress: false
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    container:
+      image: mcr.microsoft.com/playwright/python:v1.47.0-jammy
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Python dependencies
+        run: pip install --no-cache-dir -r requirements.txt
+
+      - name: Run scraper
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: python cpd_scraper.py
+
+      - name: Broadcast to Telegram channel
+        if: success()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          if [ "${{ github.event.inputs.force_broadcast }}" = "true" ]; then
+            python bot.py broadcast --force
+          else
+            python bot.py broadcast
+          fi
+
+      - name: Broadcast to WhatsApp channel
+        if: success()
+        env:
+          WHATSAPP_TOKEN: ${{ secrets.WHATSAPP_TOKEN }}
+          WHATSAPP_PHONE_ID: ${{ secrets.WHATSAPP_PHONE_ID }}
+          WHATSAPP_CHANNEL_ID: ${{ secrets.WHATSAPP_CHANNEL_ID }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          if [ "${{ github.event.inputs.force_broadcast }}" = "true" ]; then
+            python whatsapp_bot.py broadcast --force
+          else
+            python whatsapp_bot.py broadcast
+          fi
