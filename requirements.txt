@@ -11,3 +11,4 @@ httpx
 sqlalchemy
 psycopg2-binary
 pyTelegramBotAPI
+flask

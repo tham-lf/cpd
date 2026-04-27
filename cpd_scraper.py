@@ -1,4 +1,5 @@
 import asyncio
+import json
 import pandas as pd
 import re
 import os
@@ -248,12 +249,65 @@ async def scrape_event_details(page, event_id):
     
     return data
 
+def _persist_with_diff(df, engine):
+    """Upsert courses table preserving first_seen_at; return (new_ids, updated_ids, removed_ids)."""
+    try:
+        existing = pd.read_sql_table('courses', engine)
+    except Exception:
+        existing = pd.DataFrame(columns=df.columns)
+
+    existing_ids = set(existing['EventID'].astype(str)) if 'EventID' in existing.columns else set()
+    scraped_ids = set(df['EventID'].astype(str))
+    new_ids = sorted(scraped_ids - existing_ids)
+    updated_ids = sorted(scraped_ids & existing_ids)
+    removed_ids = sorted(existing_ids - scraped_ids)
+
+    if 'first_seen_at' in existing.columns:
+        first_seen_map = dict(zip(existing['EventID'].astype(str), existing['first_seen_at']))
+    else:
+        first_seen_map = {}
+
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    df['first_seen_at'] = df['EventID'].astype(str).map(lambda x: first_seen_map.get(x, now_str))
+
+    df.to_sql('courses', engine, if_exists='replace', index=False)
+    return new_ids, updated_ids, removed_ids
+
+
+def _record_run(engine, started_at, status, error, new_ids, updated_ids, removed_ids):
+    row = pd.DataFrame([{
+        "started_at": started_at,
+        "finished_at": datetime.now(),
+        "status": status,
+        "error": error,
+        "new_ids": json.dumps(new_ids),
+        "updated_ids": json.dumps(updated_ids),
+        "removed_ids": json.dumps(removed_ids),
+        "new_count": len(new_ids),
+        "updated_count": len(updated_ids),
+        "removed_count": len(removed_ids),
+    }])
+    row.to_sql('scrape_runs', engine, if_exists='append', index=False)
+
+
 async def run_scraper(progress_callback=None, limit=None):
     # Ensure browser binaries exist (crucial for Streamlit Cloud environments)
     import subprocess
     import sys
     subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"])
     
+    started_at = datetime.now()
+    run_status = "success"
+    run_error = None
+    run_new_ids = run_updated_ids = run_removed_ids = []
+    df = pd.DataFrame()
+
+    from dotenv import load_dotenv
+    from sqlalchemy import create_engine
+    load_dotenv()
+    db_url = os.getenv("DATABASE_URL")
+    audit_engine = create_engine(db_url) if db_url else None
+
     async with async_playwright() as p:
         # Use more realistic headers
         try:
@@ -262,8 +316,13 @@ async def run_scraper(progress_callback=None, limit=None):
                 args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
             )
         except Exception as e:
-            import streamlit as st
-            st.error(f"🔥 **RAW CHROMIUM CRASH LOG:**\n\n`{str(e)}`")
+            try:
+                import streamlit as st
+                st.error(f"🔥 **RAW CHROMIUM CRASH LOG:**\n\n`{str(e)}`")
+            except Exception:
+                pass
+            if audit_engine:
+                _record_run(audit_engine, started_at, "failed", f"chromium launch: {e}", [], [], [])
             raise e
         user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
         context = await browser.new_context(user_agent=user_agent)
@@ -308,29 +367,37 @@ async def run_scraper(progress_callback=None, limit=None):
         if not results:
             print("No results collected.")
             await browser.close()
+            if audit_engine:
+                _record_run(audit_engine, started_at, "failed", "No results collected", [], [], [])
             return pd.DataFrame()
 
         df = pd.DataFrame(results)
         df["Last_Scraped"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
-        from dotenv import load_dotenv
-        from sqlalchemy import create_engine
-        import os
-        
-        load_dotenv()
-        db_url = os.getenv("DATABASE_URL")
-        
-        if db_url:
-            engine = create_engine(db_url)
-            df.to_sql('courses', engine, if_exists='replace', index=False)
-            output_file = "PostgreSQL Database"
-        else:
-            # Save to CSV
-            output_file = "cpd_courses.csv"
-            df.to_csv(output_file, index=False)
-            
-        print(f"\nScraping complete! Results saved to {output_file}")
-        
+
+        try:
+            if audit_engine:
+                run_new_ids, run_updated_ids, run_removed_ids = _persist_with_diff(df, audit_engine)
+                output_file = "PostgreSQL Database"
+            else:
+                output_file = "cpd_courses.csv"
+                df.to_csv(output_file, index=False)
+        except Exception as e:
+            run_status = "failed"
+            run_error = f"persist: {e}"
+            print(f"Persist error: {e}")
+            if audit_engine:
+                _record_run(audit_engine, started_at, run_status, run_error, [], [], [])
+            await browser.close()
+            raise
+
+        if audit_engine:
+            _record_run(audit_engine, started_at, run_status, run_error, run_new_ids, run_updated_ids, run_removed_ids)
+
+        print(
+            f"\nScraping complete! Saved to {output_file}. "
+            f"New: {len(run_new_ids)}, updated: {len(run_updated_ids)}, removed: {len(run_removed_ids)}"
+        )
+
         await browser.close()
         return df
 
