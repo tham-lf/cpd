@@ -66,6 +66,34 @@ flowchart LR
     ADM --> WA_C
 ```
 
+### Tiered price extraction
+
+```mermaid
+flowchart TD
+    Start["Scraped event<br/>(SILE text + provider site + brochure PDF)"]
+    T1["Tier 1 — Text only<br/>gpt-4o-mini<br/>~$0.0002/event"]
+    Check{"Confident?<br/>Prices != Unknown<br/>Min_Price not null"}
+    HasPDF{"PDF<br/>available?"}
+    T2["Tier 2 — PDF document<br/>gpt-4o<br/>~$0.005-0.02/event"]
+    HasShot{"Screenshot<br/>captured?"}
+    T3["Tier 3 — Screenshot<br/>gpt-4o vision<br/>~$0.005-0.02/event"]
+    Cap{"Escalation<br/>cap hit?"}
+    Persist["Persist with Price_Source<br/>{text, pdf-document,<br/>screenshot, no-source}"]
+
+    Start --> T1
+    T1 --> Check
+    Check -- yes --> Persist
+    Check -- no --> Cap
+    Cap -- yes --> Persist
+    Cap -- no --> HasPDF
+    HasPDF -- yes --> T2 --> Persist
+    HasPDF -- no --> HasShot
+    HasShot -- yes --> T3 --> Persist
+    HasShot -- no --> Persist
+```
+
+Tier 1 handles the cheap majority of cases. Escalation fires only when Tier 1 returns `Prices="Unknown"` or `Min_Price=null`. The cap (`MAX_VISION_ESCALATIONS_PER_RUN`, default 30) prevents a regression on the cheap path from running up a vision-model bill. Every row records `Price_Source` and `Price_Reasoning` so the admin **New entries** tab can flag low-confidence rows for manual review.
+
 ### Diff-aware broadcast (why duplicates are impossible)
 
 ```mermaid
@@ -126,7 +154,7 @@ Two tables in the `DATABASE_URL` Postgres instance:
 
 | Table          | Columns (key fields)                                                                                  | Written by              |
 |----------------|-------------------------------------------------------------------------------------------------------|-------------------------|
-| `courses`      | `EventID`, `Title`, `Organiser`, `Date`, `Price`, `Is_Free`, `Public_CPD_Points`, `MEC_Segment`, `External_Link`, `Last_Scraped`, **`first_seen_at`** | `cpd_scraper.py`        |
+| `courses`      | `EventID`, `Title`, `Organiser`, `Date`, `Price`, `Min_Price`, `Is_Free`, `Public_CPD_Points`, `MEC_Segment`, `External_Link`, `Category`, `Last_Scraped`, **`first_seen_at`**, **`Price_Source`**, **`Price_Reasoning`** | `cpd_scraper.py`        |
 | `scrape_runs`  | `started_at`, `finished_at`, `status`, `error`, `new_ids` (JSON), `updated_ids` (JSON), `removed_ids` (JSON), `new_count`, `updated_count`, `removed_count` | `cpd_scraper.py`        |
 
 `first_seen_at` is preserved across runs by reading the existing table and merging on `EventID` before re-writing. `scrape_runs` is append-only and powers diff-aware broadcasts plus the admin **Run history** tab.
@@ -161,6 +189,9 @@ Create a local `.env` for development and mirror these as **GitHub Secrets** + *
 | `WHATSAPP_VERIFY_TOKEN`   | `whatsapp_bot.py` (webhook handshake)           | Random string you choose.                          |
 | `WHATSAPP_CHANNEL_ID`     | `whatsapp_bot.py` (channel posts)               | Channel id or broadcast destination.               |
 | `FORCE_BROADCAST`         | GitLab pipeline (optional)                      | `"true"` overrides the no-new-entries guard.       |
+| `OPENAI_TEXT_MODEL`       | `ai_utils.py` (optional)                        | Defaults to `gpt-4o-mini` for the cheap tier.      |
+| `OPENAI_VISION_MODEL`     | `ai_utils.py` (optional)                        | Defaults to `gpt-4o` for PDF/screenshot escalation.|
+| `MAX_VISION_ESCALATIONS_PER_RUN` | `cpd_scraper.py` (optional)              | Per-run cap on vision-tier calls. Default 30.      |
 
 ---
 

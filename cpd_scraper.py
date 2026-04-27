@@ -8,12 +8,37 @@ from urllib.parse import urlparse
 from playwright.async_api import async_playwright
 from bs4 import BeautifulSoup
 from pdf_utils import download_pdf_content, extract_text_from_pdf
-from ai_utils import get_ai_metadata
+from ai_utils import (
+    get_ai_metadata,
+    get_ai_metadata_from_pdf,
+    get_ai_metadata_from_screenshot,
+)
 
 # Configuration
 BASE_URL = "https://www.silecpdcentre.sg"
 CALAS_URL = f"{BASE_URL}/calas/"
 KEYWORDS_FREE = ["free", "complimentary", "no charge", "s$0", "0.00", "nil"]
+
+# Cap on vision-model escalations per scrape run (cost guard).
+# Each escalation calls gpt-4o with PDF/image input (~$0.005-0.02). 30 ≈ <$0.60/run.
+MAX_VISION_ESCALATIONS = int(os.getenv("MAX_VISION_ESCALATIONS_PER_RUN", "30"))
+_escalation_count = 0
+
+
+def _needs_escalation(ai_data):
+    """Heuristic: should we re-call with PDF/screenshot input?"""
+    if not ai_data:
+        return True
+    prices = ai_data.get("Prices")
+    if prices in (None, "", "Unknown", "unknown"):
+        return True
+    if ai_data.get("Min_Price") in (None, "", "null") and not ai_data.get("Is_Free"):
+        return True
+    return False
+
+
+def _can_escalate():
+    return _escalation_count < MAX_VISION_ESCALATIONS
 
 async def get_event_ids(page):
     """Extract all event IDs from the main CALAS table."""
@@ -145,17 +170,20 @@ async def scrape_event_details(page, event_id):
     # 2. Extract Data from Tiers (Web & PDF)
     ext_text = ""
     pdf_text = ""
+    pdf_bytes_for_escalation = None  # First downloaded PDF — used if AI text result is uncertain
+    ext_screenshot_bytes = None      # Full-page screenshot of provider site — fallback escalation
 
-    
     # Handle Attachment
     if data["Attachment_Link"] != "N/A":
         # Handle relative links
         pdf_url = data["Attachment_Link"]
         if not pdf_url.startswith("http"):
             pdf_url = f"{BASE_URL}/{pdf_url.lstrip('/')}"
-        
+
         content = await download_pdf_content(pdf_url)
         pdf_text = extract_text_from_pdf(content)
+        if content and pdf_bytes_for_escalation is None:
+            pdf_bytes_for_escalation = content
         print(f"[{event_id}] Extracted {len(pdf_text)} chars from attachment PDF.")
 
     # Handle External Link
@@ -165,6 +193,8 @@ async def scrape_event_details(page, event_id):
             content = await download_pdf_content(ext_link)
             ext_pdf_text = extract_text_from_pdf(content)
             pdf_text += "\n" + ext_pdf_text
+            if content and pdf_bytes_for_escalation is None:
+                pdf_bytes_for_escalation = content
             print(f"[{event_id}] Extracted {len(ext_pdf_text)} chars from direct PDF link.")
         else:
             try:
@@ -172,6 +202,12 @@ async def scrape_event_details(page, event_id):
                 await page.goto(ext_link, wait_until="domcontentloaded", timeout=15000)
                 ext_text = await page.inner_text("body")
                 print(f"[{event_id}] Extracted {len(ext_text)} chars from external website.")
+                # Capture a full-page screenshot for the vision-tier escalation path.
+                try:
+                    ext_screenshot_bytes = await page.screenshot(full_page=True, timeout=10000)
+                except Exception as se:
+                    print(f"[{event_id}] Screenshot capture failed (escalation will skip): {se}")
+                    ext_screenshot_bytes = None
                 
                 # Scan for nested brochures and custom provider logic
                 from urllib.parse import urljoin
@@ -193,6 +229,8 @@ async def scrape_event_details(page, event_id):
                                 content = await download_pdf_content(full_url)
                                 ext_pdf_text = extract_text_from_pdf(content)
                                 pdf_text += "\n" + ext_pdf_text
+                                if content and pdf_bytes_for_escalation is None:
+                                    pdf_bytes_for_escalation = content
                                 print(f"[{event_id}] Extracted {len(ext_pdf_text)} chars from nested brochure PDF: {full_url}")
                                 break # Stop after finding the first valid brochure to save time/bandwidth
                             except Exception:
@@ -211,37 +249,82 @@ async def scrape_event_details(page, event_id):
             except Exception as e:
                 print(f"[{event_id}] Warning: External Link fetch failed: {e}")
 
-    # 3. Use AI to Process and Reconcile
+    # 3. Tiered AI extraction:
+    #    Tier 1 (cheap)   — text-only, gpt-4o-mini.
+    #    Tier 2 (vision)  — escalate to gpt-4o with the raw PDF, if available.
+    #    Tier 3 (vision)  — escalate to gpt-4o with a full-page screenshot of the provider site.
+    #    The vision tier is gated by MAX_VISION_ESCALATIONS_PER_RUN (cost guard).
+    global _escalation_count
     if ext_text or pdf_text:
         sile_summary = f"Title: {data['Title']}\nOrganiser: {data['Organiser']}\nPoints: {data['Public_CPD_Points']}\nMEC: {data['MEC_Segment']}\nDates: {data['From']} to {data['To']}"
         ai_data = await get_ai_metadata(sile_summary, ext_text, pdf_text)
-        
+        price_source = "text"
+
+        if _needs_escalation(ai_data) and _can_escalate():
+            if pdf_bytes_for_escalation:
+                print(f"[{event_id}] Escalating to PDF-document tier (gpt-4o).")
+                escalated = await get_ai_metadata_from_pdf(sile_summary, pdf_bytes_for_escalation)
+                if escalated:
+                    ai_data = escalated
+                    price_source = "pdf-document"
+                    _escalation_count += 1
+            elif ext_screenshot_bytes:
+                print(f"[{event_id}] Escalating to screenshot tier (gpt-4o).")
+                escalated = await get_ai_metadata_from_screenshot(sile_summary, ext_screenshot_bytes)
+                if escalated:
+                    ai_data = escalated
+                    price_source = "screenshot"
+                    _escalation_count += 1
+
         if ai_data:
-            # Reconcile AI results with SILE data
+            min_price = ai_data.get("Min_Price")
+            try:
+                min_price_num = float(min_price) if min_price not in (None, "", "null") else None
+            except (TypeError, ValueError):
+                min_price_num = None
+
             data["Price"] = ai_data.get("Prices", "Unknown")
-            data["Is_Free"] = ai_data.get("Is_Free", False)
-            data["Category"] = "Free" if data["Is_Free"] else ("Paid Under $100" if ai_data.get("Min_Price", 999) < 100 else "Paid Over $100")
-            
-            # Use AI for Date/Venue if found
+            data["Min_Price"] = min_price_num
+            data["Is_Free"] = bool(ai_data.get("Is_Free", False))
+            data["Price_Source"] = price_source
+            data["Price_Reasoning"] = ai_data.get("Reasoning", "") or ""
+
+            if data["Is_Free"]:
+                data["Category"] = "Free"
+            elif min_price_num is None:
+                data["Category"] = "Paid (Check Link)"
+            elif min_price_num < 100:
+                data["Category"] = "Paid Under $100"
+            else:
+                data["Category"] = "Paid Over $100"
+
             if ai_data.get("Dates") and ai_data.get("Dates") != "N/A":
                 data["Date"] = ai_data["Dates"]
-            if ai_data.get("Venue") and ai_data.get("Venue") != "N/A":
-                # We can add a Venue column later if needed
-                pass
-            
-            print(f"[{event_id}] AI: Price='{data['Price']}', Free={data['Is_Free']}")
+
+            print(f"[{event_id}] AI({price_source}): Price='{data['Price']}', Min={min_price_num}, Free={data['Is_Free']}")
         else:
-            print(f"[{event_id}] AI fallback: Price extraction failed.")
+            print(f"[{event_id}] AI fallback: all tiers failed.")
             data["Price"] = "Unknown"
+            data["Min_Price"] = None
+            data["Is_Free"] = False
+            data["Price_Source"] = "ai-failed"
+            data["Price_Reasoning"] = ""
             data["Category"] = "Paid (Check Link)"
     else:
-        # Fallback for no external data
+        # Fallback when there is neither website text nor PDF text.
         if any(keyword in data["Title"].lower() for keyword in ["free", "complimentary"]):
             data["Is_Free"] = True
             data["Price"] = 0
+            data["Min_Price"] = 0.0
+            data["Price_Source"] = "title-fallback"
+            data["Price_Reasoning"] = "Title contains 'free' or 'complimentary'"
             data["Category"] = "Free"
         else:
             data["Price"] = "Unknown"
+            data["Min_Price"] = None
+            data["Is_Free"] = False
+            data["Price_Source"] = "no-source"
+            data["Price_Reasoning"] = ""
             data["Category"] = "Paid (Check Link)"
             
     # Duration Calculation
@@ -291,6 +374,10 @@ def _record_run(engine, started_at, status, error, new_ids, updated_ids, removed
 
 
 async def run_scraper(progress_callback=None, limit=None):
+    # Reset the per-run vision escalation counter so the cap applies per scrape, not per process.
+    global _escalation_count
+    _escalation_count = 0
+
     # Ensure browser binaries exist (crucial for Streamlit Cloud environments)
     import subprocess
     import sys
