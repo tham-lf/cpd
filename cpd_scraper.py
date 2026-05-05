@@ -12,7 +12,9 @@ from ai_utils import (
     get_ai_metadata,
     get_ai_metadata_from_pdf,
     get_ai_metadata_from_screenshot,
+    get_ai_description,
 )
+from sanity_client import upsert_courses_bulk, mark_archived
 
 # Configuration
 BASE_URL = "https://www.silecpdcentre.sg"
@@ -302,6 +304,16 @@ async def scrape_event_details(page, event_id):
                 data["Date"] = ai_data["Dates"]
 
             print(f"[{event_id}] AI({price_source}): Price='{data['Price']}', Min={min_price_num}, Free={data['Is_Free']}")
+
+            # Rich description for the public landing page (cheap, gpt-4o-mini).
+            try:
+                desc_data = await get_ai_description(sile_summary, ext_text, pdf_text)
+                if desc_data:
+                    data["Description"] = desc_data.get("description", "") or ""
+                    data["Key_Topics"] = desc_data.get("key_topics", []) or []
+                    data["Target_Audience"] = desc_data.get("target_audience", "") or ""
+            except Exception as de:
+                print(f"[{event_id}] description generation failed: {de}")
         else:
             print(f"[{event_id}] AI fallback: all tiers failed.")
             data["Price"] = "Unknown"
@@ -479,6 +491,19 @@ async def run_scraper(progress_callback=None, limit=None):
 
         if audit_engine:
             _record_run(audit_engine, started_at, run_status, run_error, run_new_ids, run_updated_ids, run_removed_ids)
+
+        # Push to Sanity so the public Next.js site at aithena-landing/cpd reflects the new data.
+        # Archive courses that disappeared from the SILE listing in this run.
+        try:
+            rows = df.to_dict(orient="records")
+            sanity_pushed = upsert_courses_bulk(rows)
+            archived_resp = mark_archived(run_removed_ids) if run_removed_ids else None
+            print(
+                f"[sanity] pushed {sanity_pushed} batch(es); "
+                f"archived {len(run_removed_ids) if archived_resp else 0} removed course(s)."
+            )
+        except Exception as se:
+            print(f"[sanity] push failed (continuing): {se}")
 
         print(
             f"\nScraping complete! Saved to {output_file}. "

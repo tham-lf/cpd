@@ -17,6 +17,15 @@ module.exports = {
       env: {
         NODE_ENV: "production",
       }
+    },
+    {
+      name: "whatsapp-bot",
+      script: "venv/bin/gunicorn",
+      args: "-w 2 -b 0.0.0.0:5000 whatsapp_bot:app",
+      interpreter: "none",
+      env: {
+        NODE_ENV: "production",
+      }
     }
   ]
 };

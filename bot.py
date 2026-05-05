@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import telebot
 import pandas as pd
@@ -11,6 +12,27 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 DATABASE_URL = os.environ.get("DATABASE_URL")
 TELEGRAM_CHANNEL_ID = os.environ.get("TELEGRAM_CHANNEL_ID")  # e.g. @sile_cpd or -100123456789
 TELEGRAM_ADMIN_ID = os.environ.get("TELEGRAM_ADMIN_ID")  # numeric user id allowed to /broadcast
+PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "https://aithena-landing.vercel.app")
+CLICK_TRACKER_URL = os.environ.get("CLICK_TRACKER_URL")  # e.g. https://api.aithena.sg/api/r — falls back to PUBLIC_BASE_URL/api/r
+
+
+def _slugify(text):
+    if not text:
+        return ""
+    s = re.sub(r"[^a-z0-9]+", "-", str(text).lower()).strip("-")
+    return s[:80]
+
+
+def link_for(row, source="telegram"):
+    """Build a public landing-page URL for a course row.
+
+    Points at the Next.js /cpd/{slug}-{event_id} description page (Aithena's domain).
+    The user lands there, reads the AI-summarised description, and clicks the
+    "Register" CTA — which routes through CLICK_TRACKER_URL/api/r/{event_id}
+    for click-tracking before 302-ing to the provider.
+    """
+    slug = f"{_slugify(row.get('Title'))}-{row['EventID']}"
+    return f"{PUBLIC_BASE_URL}/cpd/{slug}?utm_source={source}"
 
 if not TELEGRAM_TOKEN or not DATABASE_URL:
     raise ValueError("Missing Telegram Token or Database URL! Check your .env file.")
@@ -78,8 +100,8 @@ def list_free(message):
         title = str(row['Title']).strip()
         points = str(row['Public_CPD_Points'])
         dates = str(row['Date'])
-        link = str(row['External_Link']) if row['External_Link'] != 'N/A' else 'Check SILE directly'
-        
+        link = link_for(row, source="telegram_dm")
+
         response += f"🔹 *{title}*\n"
         response += f"📅 Date: {dates}\n"
         response += f"🎖 Points: {points}\n"
@@ -113,12 +135,11 @@ def search_courses(message):
     for _, row in search_results.iterrows():
         title = str(row['Title']).strip()
         price = str(row['Price'])
-        link = str(row.get('External_Link', 'N/A'))
-        
+        link = link_for(row, source="telegram_dm")
+
         response += f"🔹 *{title}*\n"
         response += f"💰 Price: {price}\n"
-        if link != 'N/A':
-            response += f"🔗 Link: [View Details]({link})\n"
+        response += f"🔗 Link: [View Details]({link})\n"
         response += "------------------------\n"
         
     bot.reply_to(message, response, parse_mode="Markdown", disable_web_page_preview=True)
@@ -169,11 +190,10 @@ def build_channel_digest(only_if_new=True):
                 dates = str(row.get('Date', 'TBA'))
                 points = str(row.get('Public_CPD_Points', 'N/A'))
                 price = str(row.get('Price', 'N/A'))
-                link = str(row.get('External_Link', 'N/A'))
+                link = link_for(row, source="telegram_channel")
                 msg += f"🔹 *{title}*\n"
                 msg += f"   📅 {dates}  •  🎖 {points} pts  •  💰 {price}\n"
-                if link and link != 'N/A':
-                    msg += f"   🔗 [Register]({link})\n"
+                msg += f"   🔗 [Details + Register]({link})\n"
             msg += "\n"
 
     if not free_df.empty:
@@ -182,11 +202,10 @@ def build_channel_digest(only_if_new=True):
             title = str(row['Title']).strip()
             dates = str(row.get('Date', 'TBA'))
             points = str(row.get('Public_CPD_Points', 'N/A'))
-            link = str(row.get('External_Link', 'N/A'))
+            link = link_for(row, source="telegram_channel")
             msg += f"🔹 *{title}*\n"
             msg += f"   📅 {dates}  •  🎖 {points} pts\n"
-            if link and link != 'N/A':
-                msg += f"   🔗 [Register]({link})\n"
+            msg += f"   🔗 [Details + Register]({link})\n"
         msg += "\n"
 
     msg += "💬 DM @" + (bot.get_me().username or "the bot") + " for /search and /stats."

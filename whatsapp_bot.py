@@ -1,10 +1,11 @@
 import os
+import re
 import sys
 import json
 import httpx
 import pandas as pd
-from flask import Flask, request, jsonify
-from sqlalchemy import create_engine
+from flask import Flask, request, jsonify, redirect
+from sqlalchemy import create_engine, text
 from dotenv import load_dotenv
 
 # Load Secrets
@@ -15,6 +16,18 @@ WHATSAPP_VERIFY_TOKEN = os.environ.get("WHATSAPP_VERIFY_TOKEN")  # webhook verif
 WHATSAPP_CHANNEL_ID = os.environ.get("WHATSAPP_CHANNEL_ID")  # WhatsApp Channel id OR broadcast destination
 DATABASE_URL = os.environ.get("DATABASE_URL")
 GRAPH_VERSION = os.environ.get("WHATSAPP_GRAPH_VERSION", "v21.0")
+PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "https://aithena-landing.vercel.app")
+
+
+def _slugify(s):
+    if not s:
+        return ""
+    return re.sub(r"[^a-z0-9]+", "-", str(s).lower()).strip("-")[:80]
+
+
+def link_for(row, source="whatsapp"):
+    slug = f"{_slugify(row.get('Title'))}-{row['EventID']}"
+    return f"{PUBLIC_BASE_URL}/cpd/{slug}?utm_source={source}"
 
 if not WHATSAPP_TOKEN or not WHATSAPP_PHONE_ID or not DATABASE_URL:
     raise ValueError("Missing WHATSAPP_TOKEN, WHATSAPP_PHONE_ID, or DATABASE_URL! Check your .env file.")
@@ -86,10 +99,8 @@ def format_free(df):
         title = str(row['Title']).strip()
         points = str(row.get('Public_CPD_Points', 'N/A'))
         dates = str(row.get('Date', 'TBA'))
-        link = str(row.get('External_Link', 'N/A'))
-        out += f"🔹 *{title}*\n📅 {dates}  •  🎖 {points} pts\n"
-        if link and link != 'N/A':
-            out += f"🔗 {link}\n"
+        link = link_for(row, source="whatsapp_dm")
+        out += f"🔹 *{title}*\n📅 {dates}  •  🎖 {points} pts\n🔗 {link}\n"
         out += "------------------------\n"
     return out
 
@@ -104,10 +115,8 @@ def format_search(df, keyword):
     for _, row in results.head(5).iterrows():
         title = str(row['Title']).strip()
         price = str(row.get('Price', 'N/A'))
-        link = str(row.get('External_Link', 'N/A'))
-        out += f"🔹 *{title}*\n💰 {price}\n"
-        if link and link != 'N/A':
-            out += f"🔗 {link}\n"
+        link = link_for(row, source="whatsapp_dm")
+        out += f"🔹 *{title}*\n💰 {price}\n🔗 {link}\n"
         out += "------------------------\n"
     return out
 
@@ -128,6 +137,86 @@ def handle_command(text):
             return "⚠️ Please provide a keyword. Example: search ethics"
         return format_search(fetch_data(), keyword)
     return "🤖 Unknown command. Send *help* to see options."
+
+
+def _ensure_clicks_table():
+    """Idempotent migration — create the clicks table on first hit."""
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(
+                """
+                CREATE TABLE IF NOT EXISTS clicks (
+                    id BIGSERIAL PRIMARY KEY,
+                    event_id TEXT NOT NULL,
+                    source TEXT,
+                    user_agent TEXT,
+                    ip TEXT,
+                    referrer TEXT,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+                """
+            ))
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS clicks_event_id_idx ON clicks (event_id)"
+            ))
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS clicks_created_at_idx ON clicks (created_at DESC)"
+            ))
+    except Exception as e:
+        print(f"[clicks] migration warning: {e}")
+
+
+_ensure_clicks_table()
+
+
+def _lookup_external_link(event_id):
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                text('SELECT "External_Link" FROM courses WHERE "EventID" = :eid LIMIT 1'),
+                {"eid": str(event_id)},
+            ).fetchone()
+            if row and row[0] and row[0] != "N/A":
+                return row[0]
+    except Exception as e:
+        print(f"[clicks] lookup failed: {e}")
+    return None
+
+
+@app.route("/api/r/<event_id>", methods=["GET"])
+def click_redirect(event_id):
+    """Click tracker — log the click and 302 to the provider's page.
+
+    Used by Telegram/WhatsApp/web links to drive traffic through aithena's
+    domain first before bouncing to the provider, so we get analytics +
+    branding on every external link.
+    """
+    source = request.args.get("source", "unknown")
+    ua = request.headers.get("User-Agent", "")[:500]
+    ip = request.headers.get("X-Forwarded-For", request.remote_addr or "")
+    referrer = request.headers.get("Referer", "")[:500]
+
+    # Insert click row (best-effort; never block the redirect on logging).
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO clicks (event_id, source, user_agent, ip, referrer)
+                    VALUES (:eid, :src, :ua, :ip, :ref)
+                    """
+                ),
+                {"eid": str(event_id), "src": source, "ua": ua, "ip": ip, "ref": referrer},
+            )
+    except Exception as e:
+        print(f"[clicks] insert failed: {e}")
+
+    # Look up the external link and 302 to it. Falls back to the public CPD page.
+    target = _lookup_external_link(event_id)
+    if not target:
+        public_base = os.environ.get("PUBLIC_BASE_URL", "https://aithena-landing.vercel.app")
+        target = f"{public_base}/cpd"
+    return redirect(target, code=302)
 
 
 @app.route("/webhook", methods=["GET"])
@@ -200,10 +289,9 @@ def build_channel_digest(only_if_new=True):
                 dates = str(row.get('Date', 'TBA'))
                 points = str(row.get('Public_CPD_Points', 'N/A'))
                 price = str(row.get('Price', 'N/A'))
-                link = str(row.get('External_Link', 'N/A'))
+                link = link_for(row, source="whatsapp_channel")
                 msg += f"🔹 *{title}*\n   📅 {dates}  •  🎖 {points} pts  •  💰 {price}\n"
-                if link and link != 'N/A':
-                    msg += f"   🔗 {link}\n"
+                msg += f"   🔗 {link}\n"
             msg += "\n"
     if not free_df.empty:
         msg += "🎉 *Top FREE Picks:*\n"
@@ -211,10 +299,9 @@ def build_channel_digest(only_if_new=True):
             title = str(row['Title']).strip()
             dates = str(row.get('Date', 'TBA'))
             points = str(row.get('Public_CPD_Points', 'N/A'))
-            link = str(row.get('External_Link', 'N/A'))
+            link = link_for(row, source="whatsapp_channel")
             msg += f"🔹 *{title}*\n   📅 {dates}  •  🎖 {points} pts\n"
-            if link and link != 'N/A':
-                msg += f"   🔗 {link}\n"
+            msg += f"   🔗 {link}\n"
         msg += "\n"
     msg += "💬 Reply *help* to this number for search and stats."
     return msg

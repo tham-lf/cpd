@@ -122,6 +122,47 @@ async def get_ai_metadata_from_pdf(sile_text, pdf_bytes, filename="brochure.pdf"
     return await _call_openai_json(VISION_MODEL, blocks)
 
 
+DESCRIPTION_PROMPT_TEMPLATE = """
+You are writing the public landing-page summary for a CPD course aimed at Singapore lawyers.
+Tone: factual, useful, neutral. NEVER quote the source verbatim — paraphrase. Avoid marketing puffery.
+
+Output a JSON object with exactly these keys:
+- description: 2-3 short paragraphs (~120-200 words total), plain prose, no markdown headings.
+  Cover what the course teaches, who'd benefit, and why a lawyer might attend.
+- key_topics: array of 3-6 short topic strings (e.g. ["Data Protection Act 2012", "DPIA workflows"]).
+- target_audience: one short sentence (e.g. "Junior associates and in-house counsel handling consumer-facing products.").
+
+Rules:
+- If the source is empty or you cannot tell, set description to "" and the lists to [].
+- Do not invent facts. Do not state prices, dates, or points — that's elsewhere on the page.
+- No emojis. No "this course will teach you" filler — just say what it covers.
+
+SILE METADATA:
+{sile_text}
+
+PROVIDER WEBSITE TEXT:
+{web_text}
+
+PDF BROCHURE TEXT:
+{pdf_text}
+"""
+
+
+async def get_ai_description(sile_text, web_text, pdf_text):
+    """Generate the rich landing-page description. Returns dict with description/key_topics/target_audience."""
+    if not client:
+        return None
+    if not (web_text or pdf_text):
+        return None
+    await asyncio.sleep(1)
+    prompt = DESCRIPTION_PROMPT_TEMPLATE.format(
+        sile_text=sile_text or "",
+        web_text=(web_text or "")[:6000],
+        pdf_text=(pdf_text or "")[:6000],
+    )
+    return await _call_openai_json(CHEAP_MODEL, [{"type": "text", "text": prompt}])
+
+
 async def get_ai_metadata_from_screenshot(sile_text, png_bytes):
     """Vision-tier escalation: send a full-page screenshot of the provider site to gpt-4o."""
     if not client or not png_bytes:

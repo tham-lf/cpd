@@ -68,8 +68,8 @@ def read_courses():
         return pd.DataFrame()
 
 
-tab_run, tab_history, tab_new, tab_broadcast, tab_schedule = st.tabs(
-    ["▶️ Run scrape", "📜 Run history", "🆕 New entries", "📢 Manual broadcast", "⏰ Schedule"]
+tab_run, tab_history, tab_new, tab_broadcast, tab_traffic, tab_schedule = st.tabs(
+    ["▶️ Run scrape", "📜 Run history", "🆕 New entries", "📢 Manual broadcast", "📈 Traffic", "⏰ Schedule"]
 )
 
 with tab_run:
@@ -152,6 +152,61 @@ with tab_broadcast:
                     st.success("Posted to WhatsApp channel.")
             except Exception as e:
                 st.error(f"WhatsApp post failed: {e}")
+
+with tab_traffic:
+    st.subheader("Click traffic — last 30 days")
+    st.caption("Clicks on the 'Register' CTA on aithena-landing /cpd pages, broken down by source query string.")
+    try:
+        clicks = pd.read_sql(
+            """
+            SELECT event_id, source, COUNT(*) AS clicks
+            FROM clicks
+            WHERE created_at > NOW() - INTERVAL '30 days'
+            GROUP BY event_id, source
+            ORDER BY clicks DESC
+            LIMIT 200
+            """,
+            engine,
+        )
+    except Exception as e:
+        clicks = pd.DataFrame()
+        st.info(f"No clicks table yet ({e}). It's auto-created on the first redirect.")
+
+    if not clicks.empty:
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown("**By source**")
+            by_source = clicks.groupby("source", as_index=False)["clicks"].sum().sort_values("clicks", ascending=False)
+            st.dataframe(by_source, use_container_width=True, hide_index=True)
+        with col2:
+            st.markdown("**Top courses by clicks**")
+            top = clicks.groupby("event_id", as_index=False)["clicks"].sum().sort_values("clicks", ascending=False).head(20)
+            try:
+                courses_df = read_courses()[["EventID", "Title"]]
+                courses_df["EventID"] = courses_df["EventID"].astype(str)
+                top["event_id"] = top["event_id"].astype(str)
+                top = top.merge(courses_df, left_on="event_id", right_on="EventID", how="left").drop(columns=["EventID"])
+            except Exception:
+                pass
+            st.dataframe(top, use_container_width=True, hide_index=True)
+
+        st.markdown("**Daily click volume**")
+        try:
+            daily = pd.read_sql(
+                """
+                SELECT DATE_TRUNC('day', created_at) AS day, source, COUNT(*) AS clicks
+                FROM clicks
+                WHERE created_at > NOW() - INTERVAL '30 days'
+                GROUP BY day, source
+                ORDER BY day DESC
+                """,
+                engine,
+            )
+            if not daily.empty:
+                pivot = daily.pivot(index="day", columns="source", values="clicks").fillna(0)
+                st.line_chart(pivot)
+        except Exception as e:
+            st.warning(f"Could not render daily chart: {e}")
 
 with tab_schedule:
     st.subheader("Schedule (staggered every 12h)")
