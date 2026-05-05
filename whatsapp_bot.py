@@ -139,6 +139,149 @@ def handle_command(text):
     return "🤖 Unknown command. Send *help* to see options."
 
 
+def _ensure_overrides_columns():
+    """Ensure description-override columns exist on the courses table."""
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(
+                'ALTER TABLE IF EXISTS courses ADD COLUMN IF NOT EXISTS description_overridden BOOLEAN DEFAULT FALSE'
+            ))
+    except Exception as e:
+        print(f"[cpd-api] override-column migration warning: {e}")
+
+
+def _slugify(s):
+    if not s:
+        return ""
+    return re.sub(r"[^a-z0-9]+", "-", str(s).lower()).strip("-")[:80]
+
+
+def _course_row_to_dict(row):
+    """Translate a Postgres row (RowMapping) into the JSON shape the Next.js app expects."""
+    g = lambda k: row.get(k) if hasattr(row, "get") else getattr(row, k, None)
+    title = g("Title") or ""
+    event_id = str(g("EventID") or "")
+    slug = f"{_slugify(title)}-{event_id}"
+
+    def _f(v):
+        try:
+            return float(v) if v not in (None, "", "N/A") else None
+        except (TypeError, ValueError):
+            return None
+
+    def _s(v):
+        if v in (None, "", "N/A"):
+            return None
+        return str(v)
+
+    key_topics = g("Key_Topics")
+    if isinstance(key_topics, str):
+        try:
+            parsed = json.loads(key_topics)
+            key_topics = parsed if isinstance(parsed, list) else None
+        except Exception:
+            key_topics = None
+    elif not isinstance(key_topics, list):
+        key_topics = None
+
+    return {
+        "eventId": event_id,
+        "title": title,
+        "slug": slug,
+        "organiser": _s(g("Organiser")),
+        "dateText": _s(g("Date")),
+        "fromAt": _s(g("From")),
+        "toAt": _s(g("To")),
+        "venue": _s(g("Venue")),
+        "cpdPoints": _f(g("Public_CPD_Points")),
+        "mecSegment": _s(g("MEC_Segment")),
+        "priceText": _s(g("Price")),
+        "minPrice": _f(g("Min_Price")),
+        "isFree": bool(g("Is_Free")),
+        "category": _s(g("Category")),
+        "description": _s(g("Description")) or "",
+        "keyTopics": key_topics,
+        "targetAudience": _s(g("Target_Audience")),
+        "externalLink": _s(g("External_Link")),
+        "attachmentLink": _s(g("Attachment_Link")),
+        "firstSeenAt": _s(g("first_seen_at")),
+        "lastScrapedAt": _s(g("Last_Scraped")),
+    }
+
+
+@app.after_request
+def _cors(response):
+    """Open CORS for the public read API so the Next.js site can call from any origin."""
+    if request.path.startswith("/api/courses"):
+        response.headers["Access-Control-Allow-Origin"] = "*"
+        response.headers["Access-Control-Allow-Methods"] = "GET"
+        response.headers["Cache-Control"] = "public, max-age=60, s-maxage=60"
+    return response
+
+
+@app.route("/api/courses", methods=["GET"])
+def api_courses_list():
+    """List all courses (used by Next.js /cpd index page and sitemap)."""
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(text(
+                'SELECT * FROM courses ORDER BY "From" ASC NULLS LAST'
+            )).mappings().all()
+        courses = [_course_row_to_dict(r) for r in rows]
+        return jsonify({"courses": courses, "total": len(courses)}), 200
+    except Exception as e:
+        print(f"[cpd-api] list error: {e}")
+        return jsonify({"courses": [], "total": 0, "error": str(e)}), 500
+
+
+@app.route("/api/courses/related", methods=["GET"])
+def api_courses_related():
+    """Find related courses (same category or MEC segment, excluding the current one)."""
+    exclude = request.args.get("exclude", "")
+    category = request.args.get("category", "")
+    mec = request.args.get("mecSegment", "")
+    try:
+        limit = max(1, min(int(request.args.get("limit", "4")), 10))
+    except ValueError:
+        limit = 4
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(
+                text(
+                    """
+                    SELECT * FROM courses
+                    WHERE "EventID" != :exclude
+                      AND ("Category" = :category OR "MEC_Segment" = :mec)
+                    ORDER BY "From" ASC NULLS LAST
+                    LIMIT :limit
+                    """
+                ),
+                {"exclude": exclude, "category": category, "mec": mec, "limit": limit},
+            ).mappings().all()
+        return jsonify({"courses": [_course_row_to_dict(r) for r in rows]}), 200
+    except Exception as e:
+        return jsonify({"courses": [], "error": str(e)}), 500
+
+
+@app.route("/api/courses/<slug_or_id>", methods=["GET"])
+def api_courses_get(slug_or_id):
+    """Single course lookup. Slug format is `{slug-text}-{EventID}` — we extract the trailing ID."""
+    # Pull the trailing numeric chunk as the EventID. Falls back to treating the whole string as id.
+    m = re.search(r"(\d+)$", slug_or_id)
+    event_id = m.group(1) if m else slug_or_id
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                text('SELECT * FROM courses WHERE "EventID" = :eid LIMIT 1'),
+                {"eid": str(event_id)},
+            ).mappings().first()
+        if not row:
+            return jsonify({"error": "not found"}), 404
+        return jsonify(_course_row_to_dict(row)), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 def _ensure_clicks_table():
     """Idempotent migration — create the clicks table on first hit."""
     try:
@@ -167,6 +310,7 @@ def _ensure_clicks_table():
 
 
 _ensure_clicks_table()
+_ensure_overrides_columns()
 
 
 def _lookup_external_link(event_id):

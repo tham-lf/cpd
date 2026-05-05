@@ -7,7 +7,6 @@
 #     DATABASE_URL, OPENAI_API_KEY,
 #     TELEGRAM_BOT_TOKEN, TELEGRAM_CHANNEL_ID,
 #     WHATSAPP_TOKEN, WHATSAPP_PHONE_ID, WHATSAPP_CHANNEL_ID,
-#     SANITY_WRITE_TOKEN  (Editor token from sanity.io/manage),
 #     PUBLIC_BASE_URL     (e.g. https://aithena.sg — used for bot landing-page links),
 #     FORCE_BROADCAST (optional: "true" to override the no-new-entries guard)
 #

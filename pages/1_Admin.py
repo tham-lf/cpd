@@ -6,7 +6,7 @@ import subprocess
 import pandas as pd
 import streamlit as st
 from datetime import datetime
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from dotenv import load_dotenv
 
 # Inject Streamlit Cloud secrets into the OS env
@@ -68,8 +68,16 @@ def read_courses():
         return pd.DataFrame()
 
 
-tab_run, tab_history, tab_new, tab_broadcast, tab_traffic, tab_schedule = st.tabs(
-    ["▶️ Run scrape", "📜 Run history", "🆕 New entries", "📢 Manual broadcast", "📈 Traffic", "⏰ Schedule"]
+tab_run, tab_history, tab_new, tab_broadcast, tab_traffic, tab_edit, tab_schedule = st.tabs(
+    [
+        "▶️ Run scrape",
+        "📜 Run history",
+        "🆕 New entries",
+        "📢 Manual broadcast",
+        "📈 Traffic",
+        "✏️ Edit descriptions",
+        "⏰ Schedule",
+    ]
 )
 
 with tab_run:
@@ -207,6 +215,119 @@ with tab_traffic:
                 st.line_chart(pivot)
         except Exception as e:
             st.warning(f"Could not render daily chart: {e}")
+
+with tab_edit:
+    st.subheader("Edit course descriptions")
+    st.caption(
+        "Override the AI-generated description shown on the public /cpd page. "
+        "Marking 'Override' protects your edit from being overwritten by future scrapes."
+    )
+
+    courses_for_edit = read_courses()
+    if courses_for_edit.empty:
+        st.info("No courses available.")
+    else:
+        # search
+        q = st.text_input("Search by title or EventID", value="")
+        filtered = courses_for_edit
+        if q:
+            ql = q.lower()
+            filtered = filtered[
+                filtered["Title"].astype(str).str.lower().str.contains(ql, na=False)
+                | filtered["EventID"].astype(str).str.contains(ql, na=False)
+            ]
+
+        # show only short / missing descriptions toggle
+        if st.checkbox("Only show courses with missing or very short descriptions", value=False):
+            if "Description" in filtered.columns:
+                filtered = filtered[
+                    filtered["Description"].fillna("").astype(str).str.len() < 80
+                ]
+
+        if filtered.empty:
+            st.info("No matching courses.")
+        else:
+            options = {
+                f"{row['Title'][:60]} — EventID {row['EventID']}": row["EventID"]
+                for _, row in filtered.head(200).iterrows()
+            }
+            picked_label = st.selectbox(
+                "Pick a course to edit", options=list(options.keys())
+            )
+            picked_event_id = options[picked_label]
+            row = filtered[filtered["EventID"].astype(str) == str(picked_event_id)].iloc[0]
+
+            current_topics = row.get("Key_Topics", None)
+            if isinstance(current_topics, str):
+                try:
+                    parsed = json.loads(current_topics)
+                    current_topics = parsed if isinstance(parsed, list) else []
+                except Exception:
+                    current_topics = []
+            elif not isinstance(current_topics, list):
+                current_topics = []
+
+            new_desc = st.text_area(
+                "Description (2-3 paragraphs)",
+                value=str(row.get("Description") or ""),
+                height=200,
+            )
+            new_topics = st.text_input(
+                "Key topics (comma-separated)",
+                value=", ".join(current_topics),
+            )
+            new_audience = st.text_input(
+                "Target audience",
+                value=str(row.get("Target_Audience") or ""),
+            )
+
+            cols = st.columns(2)
+            with cols[0]:
+                if st.button("💾 Save (mark as override)", type="primary"):
+                    topics_list = [t.strip() for t in new_topics.split(",") if t.strip()]
+                    try:
+                        with engine.begin() as conn:
+                            conn.execute(
+                                text(
+                                    '''
+                                    UPDATE courses
+                                    SET "Description" = :d,
+                                        "Key_Topics" = :t,
+                                        "Target_Audience" = :a,
+                                        description_overridden = TRUE
+                                    WHERE "EventID" = :eid
+                                    '''
+                                ),
+                                {
+                                    "d": new_desc,
+                                    "t": json.dumps(topics_list),
+                                    "a": new_audience,
+                                    "eid": str(picked_event_id),
+                                },
+                            )
+                        st.success(
+                            "Saved. The next scrape will preserve this override. "
+                            "Allow up to 60s for /cpd to refresh (ISR cache)."
+                        )
+                    except Exception as e:
+                        st.error(f"Update failed: {e}")
+            with cols[1]:
+                if st.button("↩️ Clear override (let future scrapes overwrite)"):
+                    try:
+                        with engine.begin() as conn:
+                            conn.execute(
+                                text(
+                                    '''
+                                    UPDATE courses
+                                    SET description_overridden = FALSE
+                                    WHERE "EventID" = :eid
+                                    '''
+                                ),
+                                {"eid": str(picked_event_id)},
+                            )
+                        st.success("Override cleared. Future scrapes will refresh this row.")
+                    except Exception as e:
+                        st.error(f"Update failed: {e}")
 
 with tab_schedule:
     st.subheader("Schedule (staggered every 12h)")

@@ -14,7 +14,6 @@ from ai_utils import (
     get_ai_metadata_from_screenshot,
     get_ai_description,
 )
-from sanity_client import upsert_courses_bulk, mark_archived
 
 # Configuration
 BASE_URL = "https://www.silecpdcentre.sg"
@@ -345,7 +344,10 @@ async def scrape_event_details(page, event_id):
     return data
 
 def _persist_with_diff(df, engine):
-    """Upsert courses table preserving first_seen_at; return (new_ids, updated_ids, removed_ids)."""
+    """Upsert courses table preserving first_seen_at and manual description overrides.
+
+    Returns (new_ids, updated_ids, removed_ids).
+    """
     try:
         existing = pd.read_sql_table('courses', engine)
     except Exception:
@@ -364,6 +366,29 @@ def _persist_with_diff(df, engine):
 
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     df['first_seen_at'] = df['EventID'].astype(str).map(lambda x: first_seen_map.get(x, now_str))
+
+    # Preserve manual description overrides set via the admin console.
+    # If description_overridden=True for an existing row, keep its existing description fields.
+    if 'description_overridden' in existing.columns:
+        override_rows = existing[existing['description_overridden'] == True]
+        for _, ex_row in override_rows.iterrows():
+            eid = str(ex_row.get('EventID'))
+            mask = df['EventID'].astype(str) == eid
+            if not mask.any():
+                continue
+            for col in ('Description', 'Key_Topics', 'Target_Audience'):
+                if col in existing.columns:
+                    df.loc[mask, col] = ex_row.get(col)
+        df['description_overridden'] = df['EventID'].astype(str).isin(
+            override_rows['EventID'].astype(str).tolist()
+        )
+    else:
+        df['description_overridden'] = False
+
+    # Make sure description fields are present even if AI returned nothing — keeps API shape stable.
+    for col, default in (('Description', ''), ('Key_Topics', None), ('Target_Audience', '')):
+        if col not in df.columns:
+            df[col] = default
 
     df.to_sql('courses', engine, if_exists='replace', index=False)
     return new_ids, updated_ids, removed_ids
@@ -492,18 +517,8 @@ async def run_scraper(progress_callback=None, limit=None):
         if audit_engine:
             _record_run(audit_engine, started_at, run_status, run_error, run_new_ids, run_updated_ids, run_removed_ids)
 
-        # Push to Sanity so the public Next.js site at aithena-landing/cpd reflects the new data.
-        # Archive courses that disappeared from the SILE listing in this run.
-        try:
-            rows = df.to_dict(orient="records")
-            sanity_pushed = upsert_courses_bulk(rows)
-            archived_resp = mark_archived(run_removed_ids) if run_removed_ids else None
-            print(
-                f"[sanity] pushed {sanity_pushed} batch(es); "
-                f"archived {len(run_removed_ids) if archived_resp else 0} removed course(s)."
-            )
-        except Exception as se:
-            print(f"[sanity] push failed (continuing): {se}")
+        # The public Next.js site reads directly from this Postgres via /api/courses
+        # exposed by whatsapp_bot.py — no separate push step needed.
 
         print(
             f"\nScraping complete! Saved to {output_file}. "

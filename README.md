@@ -1,13 +1,13 @@
 # SILE CPD Tracker
 
-Automated tracker for Continuing Professional Development (CPD) courses listed on the [Singapore Institute of Legal Education CALAS site](https://www.silecpdcentre.sg/calas/). The system scrapes the public CALAS table on a 12-hourly schedule, AI-classifies each course (free vs paid, MEC/ethics segment, etc.), AI-summarises each course for a public landing page, persists results to AWS RDS Postgres + Sanity CMS, and pushes new entries to four end-user surfaces:
+Automated tracker for Continuing Professional Development (CPD) courses listed on the [Singapore Institute of Legal Education CALAS site](https://www.silecpdcentre.sg/calas/). The system scrapes the public CALAS table on a 12-hourly schedule, AI-classifies each course (free vs paid, MEC/ethics segment, etc.), AI-summarises each course for a public landing page, persists results to AWS RDS Postgres, and pushes new entries to four end-user surfaces:
 
 1. **Telegram bot** — interactive DMs (`/free`, `/search`, `/stats`).
 2. **Telegram channel** — broadcast digest of newly-discovered courses.
 3. **WhatsApp bot** — same commands via Meta Cloud API webhook.
 4. **WhatsApp channel** — broadcast digest mirror.
 
-All bot and channel "Register" links route to a public landing page on the [aithena-landing](https://github.com/tham-lf/aithena-landing) Next.js site (Vercel/Amplify-hosted) at `/cpd/{slug}-{event-id}`, where users see an AI-generated description before bouncing through a click-tracking redirect (`/api/r/{event-id}`) to the provider. This drives traffic to Aithena's domain and gives us SEO + analytics on every external link.
+All bot and channel "Register" links route to a public landing page on the [aithena-landing](https://github.com/tham-lf/aithena-landing) Next.js site (Amplify-hosted) at `/cpd/{slug}-{event-id}`, where users see an AI-generated description before bouncing through a click-tracking redirect (`/api/r/{event-id}`) to the provider. The Next.js app fetches course data via a small JSON API (`/api/courses`) exposed by the same Flask process that serves the WhatsApp webhook on EC2 — single source of truth in Postgres, no separate CMS.
 
 A password-gated **Streamlit admin console** lets you trigger off-schedule scrapes, view run history, see traffic analytics, and manually broadcast.
 
@@ -194,11 +194,8 @@ Create a local `.env` for development and mirror these as **GitHub Secrets** + *
 | `OPENAI_TEXT_MODEL`       | `ai_utils.py` (optional)                        | Defaults to `gpt-4o-mini` for the cheap tier.      |
 | `OPENAI_VISION_MODEL`     | `ai_utils.py` (optional)                        | Defaults to `gpt-4o` for PDF/screenshot escalation.|
 | `MAX_VISION_ESCALATIONS_PER_RUN` | `cpd_scraper.py` (optional)              | Per-run cap on vision-tier calls. Default 30.      |
-| `SANITY_PROJECT_ID`       | `sanity_client.py` (optional)                   | Defaults to `1wpyru2z` (aithena-landing project).  |
-| `SANITY_DATASET`          | `sanity_client.py` (optional)                   | Defaults to `production`.                          |
-| `SANITY_WRITE_TOKEN`      | `sanity_client.py`, `enrich_descriptions.py`    | Editor token from sanity.io/manage; required to push course documents. |
 | `PUBLIC_BASE_URL`         | `bot.py`, `whatsapp_bot.py`                     | e.g. `https://aithena.sg`. Used to build landing-page links. |
-| `CLICK_TRACKER_URL`       | `bot.py` (optional)                             | Defaults to `{PUBLIC_BASE_URL}/api/r`. Override if the click tracker lives elsewhere (e.g. EC2 subdomain). |
+| `CLICK_TRACKER_URL`       | `bot.py` (optional)                             | Defaults to `{PUBLIC_BASE_URL}/api/r`. Override if the click tracker lives on its own subdomain (e.g. `https://api.aithena.sg/api/r`). |
 
 ---
 
